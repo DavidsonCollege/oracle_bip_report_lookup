@@ -1,0 +1,48 @@
+{
+  "name": "dav-control-budget-report",
+  "version": "1.0.0",
+  "description": "DAV Control Budget Report desktop app",
+  "main": "main.js",
+  "scripts": {
+    "start":     "electron .",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "build":     "electron-builder --mac --win"
+  },
+  "build": {
+    "appId": "com.yourorg.dav-control-budget-report",
+    "productName": "DAV Control Budget Report",
+    "icon": "assets/icon",
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "assets/**"
+    ],
+    "mac": {
+      "category": "public.app-category.business",
+      "icon": "assets/icon.icns",
+      "target": [
+        { "target": "dmg", "arch": ["universal"] }
+      ]
+    },
+    "dmg": {
+      "title": "DAV Control Budget Report"
+    },
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerHeaderIcon": null
+    }
+  },
+  "devDependencies": {
+    "electron": "^40.6.0",
+    "electron-builder": "^26.8.1"
+  }
+}

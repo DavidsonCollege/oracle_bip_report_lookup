@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DAV Control Budget Report</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f2f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+      color: #1a1a2e;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+      padding: 2.5rem;
+      width: 100%;
+      max-width: 480px;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 2rem;
+    }
+
+    .oracle-logo {
+      width: 36px;
+      height: 36px;
+      background: #c74634;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .oracle-logo svg { width: 22px; height: 22px; fill: #fff; }
+
+    .card-header h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: #1a1a2e;
+      line-height: 1.2;
+    }
+
+    .card-header p {
+      font-size: 0.8rem;
+      color: #6b7280;
+      margin-top: 2px;
+    }
+
+    .section-label {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #9ca3af;
+      margin-bottom: 0.75rem;
+    }
+
+    .credentials-box {
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 1.25rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .field { margin-bottom: 1rem; }
+    .field:last-child { margin-bottom: 0; }
+
+    label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: #374151;
+      margin-bottom: 0.35rem;
+    }
+
+    input[type="text"],
+    input[type="password"],
+    input[type="url"] {
+      width: 100%;
+      padding: 0.55rem 0.75rem;
+      border: 1.5px solid #d1d5db;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      color: #111827;
+      background: #fff;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      outline: none;
+    }
+
+    input:focus {
+      border-color: #c74634;
+      box-shadow: 0 0 0 3px rgba(199,70,52,0.12);
+    }
+
+    input::placeholder { color: #9ca3af; }
+
+    button {
+      padding: 0.55rem 1.2rem;
+      background: #c74634;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s, opacity 0.15s;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    button:hover:not(:disabled) { background: #a83929; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+    .spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(255,255,255,0.4);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      display: none;
+    }
+
+    button.loading .spinner { display: block; }
+    button.loading .btn-label { display: none; }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .result {
+      border-radius: 8px;
+      padding: 1.1rem 1.25rem;
+      font-size: 0.9rem;
+      display: none;
+      margin-top: 1rem;
+    }
+
+    .result.success {
+      display: block;
+      background: #f0fdf4;
+      border: 1.5px solid #86efac;
+      color: #166534;
+    }
+
+    .result.error {
+      display: block;
+      background: #fff1f2;
+      border: 1.5px solid #fca5a5;
+      color: #991b1b;
+    }
+
+    .error-msg { line-height: 1.5; }
+    .error-icon { font-size: 1rem; margin-right: 0.35rem; }
+
+    .note {
+      margin-top: 1.5rem;
+      font-size: 0.75rem;
+      color: #9ca3af;
+      line-height: 1.5;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="card-header">
+      <div class="oracle-logo">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm0-14c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6-2.69-6-6-6zm0 10c-2.21 0-4-1.79-4-4s1.79-4 4-4 4 1.79 4 4-1.79 4-4 4z"/>
+        </svg>
+      </div>
+      <div>
+        <h1>DAV Control Budget Report</h1>
+        <p>Download and open the report in Excel</p>
+      </div>
+    </div>
+
+    <p class="section-label">Connection &amp; Credentials</p>
+    <div class="credentials-box">
+      <div class="field">
+        <label for="baseUrl">HCM Base URL</label>
+        <input type="url" id="baseUrl" placeholder="https://your-instance.fa.ocs.oraclecloud.com" />
+      </div>
+      <div class="field">
+        <label for="username">Username</label>
+        <input type="text" id="username" autocomplete="username" />
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input type="password" id="password" placeholder="••••••••" autocomplete="current-password" />
+      </div>
+    </div>
+
+    <p class="section-label">Report</p>
+    <button id="budgetBtn" onclick="runBudgetReport()">
+      <span class="spinner"></span>
+      <span class="btn-label">Run Report</span>
+    </button>
+
+    <div class="result" id="budgetResult"></div>
+
+    <p class="note">Credentials are never stored. All requests are made securely via the desktop app — no browser CORS restrictions.</p>
+  </div>
+
+  <script>
+    // ── Restore saved settings on startup ──────────────────────────────────────
+    window.hcmAPI.getSettings().then(s => {
+      if (s.baseUrl)  document.getElementById('baseUrl').value  = s.baseUrl;
+      if (s.username) document.getElementById('username').value = s.username;
+    });
+
+    ['baseUrl', 'username', 'password'].forEach(id => {
+      document.getElementById(id).addEventListener('keydown', e => {
+        if (e.key === 'Enter') runBudgetReport();
+      });
+    });
+
+    // ── Control Budget Report ──────────────────────────────────────────────────
+
+    async function runBudgetReport() {
+      const btn      = document.getElementById('budgetBtn');
+      const resultEl = document.getElementById('budgetResult');
+
+      const baseUrl  = document.getElementById('baseUrl').value.trim().replace(/\/$/, '');
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value;
+
+      if (!baseUrl || !username || !password) {
+        resultEl.className = 'result error';
+        resultEl.innerHTML = '<span class="error-icon">&#9888;</span><span class="error-msg">All three credential fields are required.</span>';
+        return;
+      }
+
+      window.hcmAPI.saveSettings({ baseUrl, username });
+
+      btn.disabled = true;
+      btn.classList.add('loading');
+      resultEl.className = 'result';
+      resultEl.innerHTML = '';
+
+      try {
+        const result = await window.hcmAPI.budgetReport({ baseUrl, username, password });
+        if (!result.ok) throw new Error(result.error);
+        resultEl.className = 'result success';
+        resultEl.innerHTML = 'Report downloaded and opened in Excel.';
+      } catch (err) {
+        resultEl.className = 'result error';
+        resultEl.innerHTML = `<span class="error-icon">&#9888;</span><span class="error-msg">${esc(err.message)}</span>`;
+      } finally {
+        btn.disabled = false;
+        btn.classList.remove('loading');
+      }
+    }
+
+    function esc(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+  </script>
+</body>
+</html>
