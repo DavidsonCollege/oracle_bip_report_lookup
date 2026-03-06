@@ -6,10 +6,10 @@ const fs   = require('fs');
 
 function createWindow() {
   const win = new BrowserWindow({
-    width: 600,
-    height: 420,
+    width: 800,
+    height: 950,
     resizable: true,
-    title: 'DAV Control Budget Report',
+    title: 'BIP Report Lookup',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -48,32 +48,11 @@ ipcMain.handle('hcm:getSettings', () => {
   }
 });
 
-ipcMain.handle('hcm:saveSettings', (_event, { baseUrl, username }) => {
+ipcMain.handle('hcm:saveSettings', (_event, { baseUrl, username, reportPath }) => {
   try {
-    fs.writeFileSync(settingsPath(), JSON.stringify({ baseUrl, username }), 'utf8');
+    fs.writeFileSync(settingsPath(), JSON.stringify({ baseUrl, username, reportPath }), 'utf8');
   } catch {
     // Non-fatal — ignore write errors.
-  }
-});
-
-// ── IPC: hcm:budgetReport ─────────────────────────────────────────────────────
-//
-// Downloads the Control Budget SOAP report as an xlsx file and opens it
-// in the system default application (Excel).
-// Returns { ok: true } | { ok: false, error: '...' }
-
-ipcMain.handle('hcm:budgetReport', async (_event, { baseUrl, username, password }) => {
-  try {
-    const buffer   = await runSoapReportBuffer(
-      baseUrl, username, password,
-      '/Custom/Financials/Campus Reports/DAV - Control Budget Report.xdo'
-    );
-    const filePath = path.join(app.getPath('temp'), 'DAV - Control Budget Report.xlsx');
-    fs.writeFileSync(filePath, buffer);
-    await shell.openPath(filePath);
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err.message };
   }
 });
 
@@ -92,44 +71,280 @@ async function fetchWithTimeout(url, options = {}, ms = 30000) {
   }
 }
 
+// ── Shared: XML helpers ───────────────────────────────────────────────────────
+
+function extractElement(xml, localName) {
+  const re = new RegExp(
+    `<[^\\s>/]*:?${localName}[^>]*>([\\s\\S]*?)<\\/[^\\s>/]*:?${localName}>`, 'i'
+  );
+  return (xml.match(re) ?? [])[1]?.trim() ?? null;
+}
+
+function soapFaultMessage(xml) {
+  const fault = extractElement(xml, 'Fault');
+  if (!fault) return null;
+  return extractElement(fault, 'faultstring')
+    ?? extractElement(fault, 'Text')
+    ?? extractElement(fault, 'message')
+    ?? `(raw fault) ${fault.replace(/\s+/g, ' ').slice(0, 400)}`;
+}
+
+// Depth-tracking extractor — returns only top-level <item> blocks.
+function extractTopLevelItems(xml) {
+  const tags = [];
+  const openRe  = /<[a-z0-9]*:?item[\s>]/gi;
+  const closeRe = /<\/[a-z0-9]*:?item>/gi;
+  let m;
+  while ((m = openRe.exec(xml))  !== null) tags.push({ pos: m.index, open: true,  end: m.index + m[0].length });
+  while ((m = closeRe.exec(xml)) !== null) tags.push({ pos: m.index, open: false, end: m.index + m[0].length });
+  tags.sort((a, b) => a.pos - b.pos);
+  const items = [];
+  let depth = 0, start = -1;
+  for (const tag of tags) {
+    if (tag.open) { if (depth++ === 0) start = tag.pos; }
+    else if (--depth === 0 && start !== -1) { items.push(xml.slice(start, tag.end)); start = -1; }
+  }
+  return items;
+}
+
+// Extract all direct child elements as { tag, value } pairs.
+// Array-valued for elements that contain sub-items (e.g. lovValues).
+function extractAllFields(block) {
+  const fields = [];
+  const childRe = /<([a-z0-9_-]+:)?([a-z0-9_-]+)(\s[^>]*)?>(?!.*<\/\1?\2>.*<\/\1?\2>)([\s\S]*?)<\/\1?\2>/gi;
+  let m;
+  while ((m = childRe.exec(block)) !== null) {
+    const tag = m[2];
+    const inner = m[4].trim();
+    const subItems = extractTopLevelItems(inner);
+    if (subItems.length) {
+      fields.push({ tag, value: subItems.map(s => s.replace(/<[^>]+>/g, '').trim()).filter(Boolean) });
+    } else {
+      fields.push({ tag, value: inner });
+    }
+  }
+  return fields;
+}
+
+// ── Shared: v2 login → bipSessionToken ───────────────────────────────────────
+
+async function bipLogin(base, username, password) {
+  const envelope = `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+<soap:Body>
+<ns2:login xmlns:ns2="http://xmlns.oracle.com/oxp/service/v2">
+<ns2:userID>${username}</ns2:userID>
+<ns2:password>${password}</ns2:password>
+</ns2:login>
+</soap:Body>
+</soap:Envelope>`;
+
+  const resp = await fetchWithTimeout(`${base}/xmlpserver/services/v2/SecurityService`, {
+    method : 'POST',
+    headers: { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '"login"' },
+    body   : envelope,
+  });
+  const text = await resp.text();
+  const fault = soapFaultMessage(text);
+  if (fault) throw new Error(`Login SOAP fault: ${fault}`);
+
+  const token = extractElement(text, 'bipSessionToken')
+    ?? extractElement(text, 'loginReturn')
+    ?? extractElement(text, 'return');
+  if (!token) throw new Error(`Could not extract session token.\nResponse: ${text.slice(0, 400)}`);
+  return token;
+}
+
+// ── Shared: fetch all report parameters with their default values ─────────────
+// Returns { params: [{name, fields}], raw, defaultValues: {name: value} }
+
+async function fetchReportParamData(base, sessionToken, reportPath) {
+  const envelope = `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+<soap:Body>
+<ns2:getReportParametersInSession xmlns:ns2="http://xmlns.oracle.com/oxp/service/v2">
+<ns2:reportRequest>
+<ns2:reportAbsolutePath>${reportPath}</ns2:reportAbsolutePath>
+<ns2:sizeOfDataChunkDownload>-1</ns2:sizeOfDataChunkDownload>
+</ns2:reportRequest>
+<ns2:bipSessionToken>${sessionToken}</ns2:bipSessionToken>
+</ns2:getReportParametersInSession>
+</soap:Body>
+</soap:Envelope>`;
+
+  const resp = await fetchWithTimeout(`${base}/xmlpserver/services/v2/ReportService`, {
+    method : 'POST',
+    headers: { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '"getReportParametersInSession"' },
+    body   : envelope,
+  }, 60000);
+  const text = await resp.text();
+  const fault = soapFaultMessage(text);
+  if (fault) throw new Error(`getReportParametersInSession SOAP fault: ${fault}`);
+
+  const params = extractTopLevelItems(text).map(block => {
+    const fields = extractAllFields(block);
+    const name = (fields.find(f => f.tag === 'name') ?? {}).value ?? '';
+    return { name, fields };
+  }).filter(p => p.name);
+
+  // Build name → defaultValue map (empty string if no default)
+  const defaultValues = {};
+  for (const p of params) {
+    const def = (p.fields.find(f => f.tag === 'defaultValue') ?? {}).value ?? '';
+    defaultValues[p.name] = Array.isArray(def) ? def[0] ?? '' : def;
+  }
+
+  return { params, raw: text, defaultValues };
+}
+
+// ── Shared: fetch available report layouts ────────────────────────────────────
+
+async function fetchReportLayouts(base, username, password, reportPath) {
+  const envelope = `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+<soap:Body>
+<ns2:getReportDefinition xmlns:ns2="http://xmlns.oracle.com/oxp/service/v2">
+<ns2:userID>${username}</ns2:userID>
+<ns2:password>${password}</ns2:password>
+<ns2:reportAbsolutePath>${reportPath}</ns2:reportAbsolutePath>
+</ns2:getReportDefinition>
+</soap:Body>
+</soap:Envelope>`;
+
+  const resp = await fetchWithTimeout(`${base}/xmlpserver/services/v2/ReportService`, {
+    method : 'POST',
+    headers: { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '"getReportDefinition"' },
+    body   : envelope,
+  }, 60000);
+  // Oracle returns layout data even when soapFaultMessage fires — skip fault check,
+  // just return the raw text and let the caller parse what it needs.
+  return await resp.text();
+}
+
+// ── IPC: hcm:getReportParams ──────────────────────────────────────────────────
+
+ipcMain.handle('hcm:getReportParams', async (_event, { baseUrl, username, password, reportPath }) => {
+  const base = baseUrl.replace(/\/$/, '');
+  const REPORT_PATH = reportPath || '/Custom/Financials/Campus Reports/DAV - Control Budget Report.xdo';
+  try {
+    const token = await bipLogin(base, username, password);
+    const { params, raw } = await fetchReportParamData(base, token, REPORT_PATH);
+
+    // Also fetch layout names — non-fatal if it fails.
+    let layoutsRaw = null;
+    let layouts = [];
+    try {
+      layoutsRaw = await fetchReportLayouts(base, username, password, REPORT_PATH);
+      // Extract defaultTemplateId (the report's default layout).
+      const defaultId = extractElement(layoutsRaw, 'defaultTemplateId');
+      // Extract all templateId values from listOfTemplateFormatsLabelValues items.
+      const lovSection = (layoutsRaw.match(/<[^>]*listOfTemplateFormatsLabelValues[^>]*>([\s\S]*?)<\/[^>]*listOfTemplateFormatsLabelValues[^>]*>/i) ?? [])[1] ?? '';
+      const idRe = /<[^>]*:?templateId[^>]*>([^<]+)<\/[^>]*:?templateId[^>]*>/gi;
+      const seen = new Set();
+      let m;
+      while ((m = idRe.exec(lovSection)) !== null) {
+        const val = m[1].trim();
+        if (!seen.has(val)) { seen.add(val); layouts.push(val); }
+      }
+      // If we got no templateId entries, fall back to defaultTemplateId alone.
+      if (!layouts.length && defaultId) layouts.push(defaultId);
+    } catch (layoutErr) {
+      layouts = [`(layout fetch failed: ${layoutErr.message})`];
+    }
+
+    return { ok: true, params, raw, layouts, layoutsRaw };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+// ── IPC: hcm:budgetReport ─────────────────────────────────────────────────────
+//
+// 1. Logs in to get a session token.
+// 2. Fetches all report parameters and their Oracle-default values.
+// 3. Merges with user-supplied paramValues (non-empty UI values override defaults).
+// 4. Runs the report and opens the xlsx.
+// Returns { ok: true } | { ok: false, error: '...' }
+
+ipcMain.handle('hcm:budgetReport', async (_event, { baseUrl, username, password, reportPath, paramValues, layoutName }) => {
+  const base = baseUrl.replace(/\/$/, '');
+  const REPORT_PATH = reportPath || '/Custom/Financials/Campus Reports/DAV - Control Budget Report.xdo';
+
+  let defaultValues = {};
+  try {
+    // Step 1: login
+    const token = await bipLogin(base, username, password);
+
+    // Step 2: fetch all parameters and their defaults
+    ({ defaultValues } = await fetchReportParamData(base, token, REPORT_PATH));
+
+    // Step 3: apply non-empty values from the UI — they override Oracle defaults.
+    for (const [k, v] of Object.entries(paramValues || {})) {
+      if (v != null && v !== '') defaultValues[k] = v;
+    }
+
+    // Step 4: run the report
+    const resolvedLayout = layoutName || '';
+    const sentParams = Object.entries(defaultValues).filter(([, v]) => v != null && v !== '');
+    console.log(`[budgetReport] Layout: ${JSON.stringify(resolvedLayout)}`);
+    console.log(`[budgetReport] Sending ${sentParams.length} parameters:`);
+    for (const [k, v] of sentParams) console.log(`  ${k} = ${JSON.stringify(v)}`);
+
+    const { buffer, soapXml } = await runSoapReportBuffer(base, username, password, REPORT_PATH, defaultValues, resolvedLayout);
+    const reportName = path.basename(REPORT_PATH, path.extname(REPORT_PATH));
+    // Use a timestamp suffix so Excel never serves a stale cached file.
+    const timestamp  = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const filePath   = path.join(app.getPath('temp'), `${reportName} ${timestamp}.xlsx`);
+    fs.writeFileSync(filePath, buffer);
+    await shell.openPath(filePath);
+    return { ok: true, soapXml };
+  } catch (err) {
+    const sentSummary = Object.entries(defaultValues ?? {})
+      .filter(([, v]) => v != null && v !== '')
+      .map(([k, v]) => `${k}=${v}`)
+      .join(', ');
+    return { ok: false, error: err.message, sentParams: sentSummary, soapXml: err.soapXml };
+  }
+});
+
 // ── Shared: SOAP report buffer ────────────────────────────────────────────────
 //
-// Handles the SOAP envelope, network call, fault detection, and base64 decode.
-// Returns the raw xlsx Buffer.
+// Builds parameterNameValues from the provided name→value map, then
+// calls PublicReportService::runReport and returns the raw xlsx Buffer.
 
-async function runSoapReportBuffer(baseUrl, username, password, reportPath) {
+async function runSoapReportBuffer(baseUrl, username, password, reportPath, paramValues = {}, templateName = '') {
   const SOAP_ENDPOINT = `${baseUrl.replace(/\/$/, '')}/xmlpserver/services/PublicReportService`;
 
-  function extractElement(xml, localName) {
-    const re = new RegExp(
-      `<[^\\s>/]*:?${localName}[^>]*>([\\s\\S]*?)<\\/[^\\s>/]*:?${localName}>`, 'i'
-    );
-    return (xml.match(re) ?? [])[1]?.trim() ?? null;
-  }
-
-  function soapFaultMessage(xml) {
-    const fault = extractElement(xml, 'Fault');
-    if (!fault) return null;
-    return extractElement(fault, 'faultstring')
-      ?? extractElement(fault, 'Text')
-      ?? extractElement(fault, 'message')
-      ?? `(raw fault) ${fault.replace(/\s+/g, ' ').slice(0, 400)}`;
-  }
+  // Only send parameters with a non-empty value.
+  // Sending empty strings for LOV-constrained parameters causes "Invalid parameters" errors;
+  // omitting them entirely lets BIP use its server-side default.
+  const paramXml = Object.entries(paramValues)
+    .filter(([, v]) => v != null && v !== '')
+    .map(([name, value]) =>
+      `<item>\n<name>${name}</name>\n<values><item>${value}</item></values>\n</item>`
+    ).join('\n');
 
   const envelope = `<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
 <soap:Body>
 <runReport xmlns="http://xmlns.oracle.com/oxp/service/PublicReportService">
 <reportRequest>
-<reportAbsolutePath>${reportPath}</reportAbsolutePath>
+<reportAbsolutePath>${reportPath}</reportAbsolutePath>${templateName ? `\n<attributeTemplate>${templateName}</attributeTemplate>` : ''}
 <attributeFormat>xlsx</attributeFormat>
 <sizeOfDataChunkDownload>-1</sizeOfDataChunkDownload>
+<parameterNameValues>
+${paramXml}
+</parameterNameValues>
 </reportRequest>
 <userID>${username}</userID>
 <password>${password}</password>
 </runReport>
 </soap:Body>
 </soap:Envelope>`;
+
+  // Log the exact XML being sent (password redacted).
+  const redacted = envelope.replace(/<password>[^<]*<\/password>/, '<password>***</password>');
+  console.log('[runSoapReportBuffer] Sending SOAP envelope:\n' + redacted);
 
   const response = await fetchWithTimeout(SOAP_ENDPOINT, {
     method : 'POST',
@@ -138,15 +353,21 @@ async function runSoapReportBuffer(baseUrl, username, password, reportPath) {
       'SOAPAction'  : '"runReport"',
     },
     body: envelope,
-  });
+  }, 120000);
 
   const responseText = await response.text();
 
   const fault = soapFaultMessage(responseText);
-  if (fault) throw new Error(`SOAP fault: ${fault}`);
+  if (fault) {
+    const e = new Error(`SOAP fault: ${fault}`);
+    e.soapXml = redacted;
+    throw e;
+  }
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${responseText.slice(0, 300)}`);
+    const e = new Error(`HTTP ${response.status}: ${responseText.slice(0, 300)}`);
+    e.soapXml = redacted;
+    throw e;
   }
 
   const b64 = extractElement(responseText, 'reportBytes');
@@ -154,5 +375,5 @@ async function runSoapReportBuffer(baseUrl, username, password, reportPath) {
     throw new Error(`No reportBytes in SOAP response.\nSnippet: ${responseText.slice(0, 300)}`);
   }
 
-  return Buffer.from(b64, 'base64');
+  return { buffer: Buffer.from(b64, 'base64'), soapXml: redacted };
 }

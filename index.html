@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DAV Control Budget Report</title>
+  <title>BIP Report Lookup</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -24,7 +24,7 @@
       box-shadow: 0 4px 24px rgba(0,0,0,0.08);
       padding: 2.5rem;
       width: 100%;
-      max-width: 480px;
+      max-width: 680px;
     }
 
     .card-header {
@@ -80,6 +80,30 @@
     .field { margin-bottom: 1rem; }
     .field:last-child { margin-bottom: 0; }
 
+    .lov-wrap { position: relative; }
+    .lov-dd {
+      display: none;
+      position: absolute;
+      left: 0; right: 0; top: 100%;
+      z-index: 200;
+      background: #1f2937;
+      border: 1px solid #4b5563;
+      border-radius: 0 0 6px 6px;
+      max-height: 180px;
+      overflow-y: auto;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    }
+    .lov-opt {
+      padding: 0.35rem 0.65rem;
+      font-size: 0.82rem;
+      color: #e5e7eb;
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .lov-opt:hover, .lov-opt.active { background: #374151; }
+
     label {
       display: block;
       font-size: 0.8rem;
@@ -90,7 +114,8 @@
 
     input[type="text"],
     input[type="password"],
-    input[type="url"] {
+    input[type="url"],
+    select {
       width: 100%;
       padding: 0.55rem 0.75rem;
       border: 1.5px solid #d1d5db;
@@ -101,6 +126,8 @@
       transition: border-color 0.15s, box-shadow 0.15s;
       outline: none;
     }
+
+    select:disabled { background: #f9fafb; color: #9ca3af; cursor: not-allowed; }
 
     input:focus {
       border-color: #c74634;
@@ -186,15 +213,15 @@
         </svg>
       </div>
       <div>
-        <h1>DAV Control Budget Report</h1>
-        <p>Download and open the report in Excel</p>
+        <h1>BIP Report Lookup</h1>
+        <p>Download and open Oracle BI Publisher reports in Excel</p>
       </div>
     </div>
 
     <p class="section-label">Connection &amp; Credentials</p>
     <div class="credentials-box">
       <div class="field">
-        <label for="baseUrl">HCM Base URL</label>
+        <label for="baseUrl">Oracle URL</label>
         <input type="url" id="baseUrl" placeholder="https://your-instance.fa.ocs.oraclecloud.com" />
       </div>
       <div class="field">
@@ -205,24 +232,48 @@
         <label for="password">Password</label>
         <input type="password" id="password" placeholder="••••••••" autocomplete="current-password" />
       </div>
+      <div class="field">
+        <label for="reportPath">Report Path <span style="font-weight:400;color:#9ca3af">(start with Custom/)</span></label>
+        <input type="text" id="reportPath" placeholder="/Custom/Financials/..." />
+      </div>
+    </div>
+
+    <p class="section-label">Report Parameters</p>
+    <div class="credentials-box" id="paramFieldsBox" style="color:#9ca3af;font-size:0.82rem;">
+      Click <strong>Inspect Parameters</strong> to load report fields.
     </div>
 
     <p class="section-label">Report</p>
-    <button id="budgetBtn" onclick="runBudgetReport()">
-      <span class="spinner"></span>
-      <span class="btn-label">Run Report</span>
-    </button>
+    <div class="field" style="margin-bottom:0.75rem;">
+      <label for="layoutSelect">Layout</label>
+      <select id="layoutSelect" disabled>
+        <option value="">Run Inspect Parameters to load layouts</option>
+      </select>
+    </div>
+    <div style="display:flex;gap:0.6rem;flex-wrap:wrap;align-items:center;">
+      <button id="budgetBtn" onclick="runBudgetReport()">
+        <span class="spinner"></span>
+        <span class="btn-label">Run Report</span>
+      </button>
+      <button id="paramsBtn" onclick="fetchReportParams()" style="background:#4b5563;">
+        <span class="spinner"></span>
+        <span class="btn-label">Inspect Parameters</span>
+      </button>
+    </div>
 
     <div class="result" id="budgetResult"></div>
+    <div id="paramsResult" style="margin-top:1rem;display:none;"></div>
 
     <p class="note">Credentials are never stored. All requests are made securely via the desktop app — no browser CORS restrictions.</p>
   </div>
 
   <script>
     // ── Restore saved settings on startup ──────────────────────────────────────
+    const DEFAULT_REPORT_PATH = '/Custom/Financials/Campus Reports/DAV - Control Budget Report.xdo';
     window.hcmAPI.getSettings().then(s => {
-      if (s.baseUrl)  document.getElementById('baseUrl').value  = s.baseUrl;
-      if (s.username) document.getElementById('username').value = s.username;
+      if (s.baseUrl)  document.getElementById('baseUrl').value    = s.baseUrl;
+      if (s.username) document.getElementById('username').value   = s.username;
+      document.getElementById('reportPath').value = s.reportPath || DEFAULT_REPORT_PATH;
     });
 
     ['baseUrl', 'username', 'password'].forEach(id => {
@@ -237,9 +288,21 @@
       const btn      = document.getElementById('budgetBtn');
       const resultEl = document.getElementById('budgetResult');
 
-      const baseUrl  = document.getElementById('baseUrl').value.trim().replace(/\/$/, '');
-      const username = document.getElementById('username').value.trim();
-      const password = document.getElementById('password').value;
+      const baseUrl    = document.getElementById('baseUrl').value.trim().replace(/\/$/, '');
+      const username   = document.getElementById('username').value.trim();
+      const password   = document.getElementById('password').value;
+      const reportPath = document.getElementById('reportPath').value.trim();
+
+      // Collect values from the dynamically-rendered param fields.
+      const paramValues = {};
+      const emptyRequired = [];
+      document.querySelectorAll('#paramFieldsBox input[data-param]').forEach(input => {
+        const val = input.value.trim();
+        paramValues[input.dataset.param] = val;
+        if (!val && input.placeholder === 'Required') emptyRequired.push(input.dataset.param);
+      });
+
+      const layoutName = document.getElementById('layoutSelect').value;
 
       if (!baseUrl || !username || !password) {
         resultEl.className = 'result error';
@@ -247,7 +310,13 @@
         return;
       }
 
-      window.hcmAPI.saveSettings({ baseUrl, username });
+      if (emptyRequired.length) {
+        resultEl.className = 'result error';
+        resultEl.innerHTML = `<span class="error-icon">&#9888;</span><span class="error-msg">Required parameter${emptyRequired.length > 1 ? 's' : ''} missing a value: <strong>${emptyRequired.join(', ')}</strong></span>`;
+        return;
+      }
+
+      window.hcmAPI.saveSettings({ baseUrl, username, reportPath });
 
       btn.disabled = true;
       btn.classList.add('loading');
@@ -255,10 +324,21 @@
       resultEl.innerHTML = '';
 
       try {
-        const result = await window.hcmAPI.budgetReport({ baseUrl, username, password });
-        if (!result.ok) throw new Error(result.error);
+        const result = await window.hcmAPI.budgetReport({ baseUrl, username, password, reportPath, paramValues, layoutName });
+
+        // Always show the SOAP XML that was sent, regardless of success/failure.
+        const xmlBlock = result.soapXml
+          ? `<details style="margin-top:0.75rem;font-size:0.75rem;color:#9ca3af"><summary style="cursor:pointer">SOAP XML sent</summary><pre style="margin-top:0.4rem;white-space:pre-wrap;word-break:break-all;background:#f3f4f6;padding:0.75rem;border-radius:6px;font-size:0.7rem;color:#374151">${esc(result.soapXml)}</pre></details>`
+          : '';
+
+        if (!result.ok) {
+          const detail = result.sentParams ? `\n\nParameters sent: ${result.sentParams}` : '';
+          resultEl.className = 'result error';
+          resultEl.innerHTML = `<span class="error-icon">&#9888;</span><span class="error-msg">${esc(result.error + detail)}</span>${xmlBlock}`;
+          return;
+        }
         resultEl.className = 'result success';
-        resultEl.innerHTML = 'Report downloaded and opened in Excel.';
+        resultEl.innerHTML = `Report downloaded and opened in Excel.${xmlBlock}`;
       } catch (err) {
         resultEl.className = 'result error';
         resultEl.innerHTML = `<span class="error-icon">&#9888;</span><span class="error-msg">${esc(err.message)}</span>`;
@@ -266,6 +346,217 @@
         btn.disabled = false;
         btn.classList.remove('loading');
       }
+    }
+
+    // ── Inspect Parameters ─────────────────────────────────────────────────────
+
+    async function fetchReportParams() {
+      const btn      = document.getElementById('paramsBtn');
+      const resultEl = document.getElementById('paramsResult');
+
+      const baseUrl    = document.getElementById('baseUrl').value.trim().replace(/\/$/, '');
+      const username   = document.getElementById('username').value.trim();
+      const password   = document.getElementById('password').value;
+      const reportPath = document.getElementById('reportPath').value.trim();
+
+      if (!baseUrl || !username || !password) {
+        resultEl.style.display = 'block';
+        resultEl.innerHTML = '<div class="result error" style="display:block;margin:0"><span class="error-icon">&#9888;</span>All three credential fields are required.</div>';
+        return;
+      }
+
+      btn.disabled = true;
+      btn.classList.add('loading');
+      resultEl.style.display = 'none';
+      resultEl.innerHTML = '';
+
+      try {
+        const result = await window.hcmAPI.getReportParams({ baseUrl, username, password, reportPath });
+        if (!result.ok) throw new Error(result.error);
+
+        // Populate the Report Parameters input section.
+        renderParamFields(result.params);
+
+        // Populate the layout selector.
+        const sel = document.getElementById('layoutSelect');
+        sel.innerHTML = result.layouts.length
+          ? result.layouts.map(l => `<option value="${esc(l)}">${esc(l)}</option>`).join('')
+          : '<option value="">No layouts found</option>';
+        sel.disabled = result.layouts.length === 0;
+
+        if (!result.params.length) {
+          resultEl.innerHTML = '<div class="result success" style="display:block;margin:0">No parameters found (report may have none, or the server returned an unexpected format).</div>';
+          resultEl.style.display = 'block';
+          return;
+        }
+
+        const requiredCount = result.params.filter(p =>
+          (p.fields.find(f => f.tag === 'required') ?? {}).value === 'true'
+        ).length;
+
+        let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">`;
+        html += `<p class="section-label" style="margin:0">Report Parameters (${result.params.length}) — click to expand</p>`;
+        html += `<label style="display:flex;align-items:center;gap:0.35rem;font-size:0.78rem;color:#374151;cursor:pointer;font-weight:500;">`;
+        html += `<input type="checkbox" id="reqOnlyChk" onchange="filterParams()" style="cursor:pointer;accent-color:#c74634;">`;
+        html += `Required only (${requiredCount})</label></div>`;
+        html += '<div style="border:1.5px solid #e5e7eb;border-radius:8px;overflow:hidden;">';
+        result.params.forEach((p, i) => {
+          const id = `param-detail-${i}`;
+          const hasDetails = p.fields.filter(f => f.tag !== 'name').length > 0;
+          const isRequired = (p.fields.find(f => f.tag === 'required') ?? {}).value === 'true';
+          html += `<div data-required="${isRequired}" style="border-top:${i ? '1px solid #e5e7eb' : 'none'}">`;
+          // Header row — always visible, clickable if there are details
+          html += `<div onclick="toggleParam('${id}')" style="display:flex;justify-content:space-between;align-items:center;padding:0.65rem 1rem;cursor:${hasDetails ? 'pointer' : 'default'};user-select:none;" onmouseover="if(${hasDetails})this.style.background='#f3f4f6'" onmouseout="this.style.background=''">`;
+          html += `<span style="font-weight:600;font-size:0.85rem;color:#111827;font-family:monospace">${esc(p.name)}</span>`;
+          if (hasDetails) html += `<span id="${id}-arrow" style="font-size:0.7rem;color:#9ca3af">&#9660;</span>`;
+          html += '</div>';
+          // Detail panel — hidden by default
+          const detailFields = p.fields.filter(f => f.tag !== 'name');
+          if (detailFields.length) {
+            html += `<div id="${id}" style="display:none;padding:0.5rem 1rem 0.75rem 1rem;background:#f9fafb;border-top:1px solid #e5e7eb;">`;
+            for (const f of detailFields) {
+              html += `<div style="font-size:0.8rem;color:#374151;margin-bottom:0.4rem">`;
+              html += `<span style="color:#9ca3af;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em">${esc(f.tag)}</span><br>`;
+              if (Array.isArray(f.value)) {
+                html += f.value.map(v => `<span style="display:inline-block;background:#e5e7eb;border-radius:4px;padding:0.1rem 0.45rem;margin:0.15rem 0.15rem 0 0;font-size:0.75rem">${esc(v)}</span>`).join('');
+              } else {
+                html += `<span>${esc(f.value)}</span>`;
+              }
+              html += '</div>';
+            }
+            html += '</div>';
+          }
+          html += '</div>';
+        });
+        html += '</div>';
+
+        // Layouts section
+        if (result.layouts && result.layouts.length) {
+          html += `<div style="margin-top:1rem;">`;
+          html += `<p class="section-label" style="margin-bottom:0.4rem">Available Layouts (${result.layouts.length})</p>`;
+          html += `<div style="border:1.5px solid #e5e7eb;border-radius:8px;padding:0.75rem 1rem;background:#f9fafb;">`;
+          html += result.layouts.map(l => `<span style="display:inline-block;background:#e5e7eb;border-radius:4px;padding:0.15rem 0.55rem;margin:0.15rem 0.15rem 0 0;font-size:0.8rem;font-family:monospace">${esc(l)}</span>`).join('');
+          html += `</div></div>`;
+        }
+
+        // Raw XML toggle
+        html += `<details style="margin-top:0.5rem;font-size:0.75rem;color:#9ca3af">
+          <summary style="cursor:pointer">Raw SOAP response (params)</summary>
+          <pre style="margin-top:0.4rem;white-space:pre-wrap;word-break:break-all;background:#f3f4f6;padding:0.75rem;border-radius:6px;font-size:0.7rem;color:#374151">${esc(result.raw)}</pre>
+        </details>`;
+        if (result.layoutsRaw) {
+          html += `<details style="margin-top:0.25rem;font-size:0.75rem;color:#9ca3af">
+            <summary style="cursor:pointer">Raw SOAP response (layouts)</summary>
+            <pre style="margin-top:0.4rem;white-space:pre-wrap;word-break:break-all;background:#f3f4f6;padding:0.75rem;border-radius:6px;font-size:0.7rem;color:#374151">${esc(result.layoutsRaw)}</pre>
+          </details>`;
+        }
+
+        resultEl.innerHTML = html;
+        resultEl.style.display = 'block';
+      } catch (err) {
+        resultEl.innerHTML = `<div class="result error" style="display:block;margin:0"><span class="error-icon">&#9888;</span><span class="error-msg">${esc(err.message)}</span></div>`;
+        resultEl.style.display = 'block';
+      } finally {
+        btn.disabled = false;
+        btn.classList.remove('loading');
+      }
+    }
+
+    // ── Dynamic Report Parameters section ──────────────────────────────────────
+
+    // LOV data keyed by param name, populated by renderParamFields
+    const _lovData = {};
+
+    function renderParamFields(params) {
+      const box = document.getElementById('paramFieldsBox');
+      if (!params || !params.length) {
+        box.innerHTML = '<span style="font-size:0.82rem;color:#9ca3af">No parameters found.</span>';
+        return;
+      }
+      // Reset LOV data
+      for (const k of Object.keys(_lovData)) delete _lovData[k];
+
+      let html = '';
+      for (const p of params) {
+        const rawDefault = (p.fields.find(f => f.tag === 'defaultValue') ?? {}).value ?? '';
+        const defaultVal = Array.isArray(rawDefault) ? (rawDefault[0] ?? '') : rawDefault;
+        const lovField    = p.fields.find(f => f.tag === 'values');
+        const lovValues   = lovField
+          ? (Array.isArray(lovField.value) ? lovField.value : [lovField.value].filter(Boolean))
+          : [];
+        const labelsField = p.fields.find(f => f.tag === 'lovLabels');
+        const lovLabels   = labelsField
+          ? (Array.isArray(labelsField.value) ? labelsField.value : [labelsField.value].filter(Boolean))
+          : [];
+        const isRequired = (p.fields.find(f => f.tag === 'required') ?? {}).value === 'true';
+        const inputId    = `dp-${p.name}`;
+
+        if (lovValues.length) _lovData[p.name] = { values: lovValues, labels: lovLabels };
+
+        html += `<div class="field">`;
+        html += `<label for="${inputId}">${esc(p.name)}`;
+        if (isRequired) html += ` <span style="color:#c74634;font-weight:700">*</span>`;
+        html += `</label>`;
+        if (lovValues.length) {
+          html += `<div class="lov-wrap">`;
+          html += `<input type="text" id="${inputId}" data-param="${esc(p.name)}" value="${esc(defaultVal)}" placeholder="${isRequired ? 'Required' : 'Optional'}" autocomplete="off" />`;
+          html += `<div class="lov-dd" id="dd-${esc(p.name)}"></div>`;
+          html += `</div>`;
+        } else {
+          html += `<input type="text" id="${inputId}" data-param="${esc(p.name)}" value="${esc(defaultVal)}" placeholder="${isRequired ? 'Required' : 'Optional'}" />`;
+        }
+        html += `</div>`;
+      }
+      box.innerHTML = html;
+      attachLovHandlers();
+    }
+
+    function attachLovHandlers() {
+      for (const [paramName, { values, labels }] of Object.entries(_lovData)) {
+        const input = document.getElementById(`dp-${paramName}`);
+        const dd    = document.getElementById(`dd-${paramName}`);
+        if (!input || !dd) continue;
+
+        function showFiltered(query) {
+          const q = query.toLowerCase();
+          const filtered = [];
+          for (let i = 0; i < values.length && filtered.length < 100; i++) {
+            const v = values[i], l = labels[i] ?? v;
+            if (!q || v.toLowerCase().includes(q) || l.toLowerCase().includes(q)) {
+              filtered.push({ v, l });
+            }
+          }
+          if (!filtered.length) { dd.style.display = 'none'; return; }
+          dd.innerHTML = filtered.map(({ v, l }) =>
+            `<div class="lov-opt" data-val="${esc(v)}"><span style="font-family:monospace;color:#9ca3af;margin-right:0.5rem">${esc(v)}</span>${esc(l)}</div>`
+          ).join('');
+          dd.style.display = 'block';
+        }
+
+        input.addEventListener('focus', () => showFiltered(''));
+        input.addEventListener('input', () => showFiltered(input.value));
+        input.addEventListener('blur',  () => setTimeout(() => { dd.style.display = 'none'; }, 150));
+        dd.addEventListener('mousedown', e => {
+          const opt = e.target.closest('.lov-opt');
+          if (opt) { input.value = opt.dataset.val; dd.style.display = 'none'; }
+        });
+      }
+    }
+
+    function filterParams() {
+      const reqOnly = document.getElementById('reqOnlyChk').checked;
+      document.querySelectorAll('#paramsResult [data-required]').forEach(row => {
+        row.style.display = reqOnly && row.dataset.required !== 'true' ? 'none' : '';
+      });
+    }
+
+    function toggleParam(id) {
+      const panel = document.getElementById(id);
+      const arrow = document.getElementById(id + '-arrow');
+      if (!panel) return;
+      const open = panel.style.display === 'block';
+      panel.style.display = open ? 'none' : 'block';
+      if (arrow) arrow.innerHTML = open ? '&#9660;' : '&#9650;';
     }
 
     function esc(str) {
