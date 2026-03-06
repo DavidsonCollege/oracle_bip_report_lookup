@@ -40,7 +40,7 @@ function settingsPath() {
 
 ipcMain.handle('shell:openExternal', (_event, url) => shell.openExternal(url));
 
-ipcMain.handle('hcm:getSettings', () => {
+ipcMain.handle('bip:getSettings', () => {
   try {
     return JSON.parse(fs.readFileSync(settingsPath(), 'utf8'));
   } catch {
@@ -48,7 +48,7 @@ ipcMain.handle('hcm:getSettings', () => {
   }
 });
 
-ipcMain.handle('hcm:saveSettings', (_event, { baseUrl, username, reportPath }) => {
+ipcMain.handle('bip:saveSettings', (_event, { baseUrl, username, reportPath }) => {
   try {
     fs.writeFileSync(settingsPath(), JSON.stringify({ baseUrl, username, reportPath }), 'utf8');
   } catch {
@@ -72,6 +72,15 @@ async function fetchWithTimeout(url, options = {}, ms = 30000) {
 }
 
 // ── Shared: XML helpers ───────────────────────────────────────────────────────
+
+function xmlEscape(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
 
 function extractElement(xml, localName) {
   const re = new RegExp(
@@ -133,8 +142,8 @@ async function bipLogin(base, username, password) {
 <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
 <soap:Body>
 <ns2:login xmlns:ns2="http://xmlns.oracle.com/oxp/service/v2">
-<ns2:userID>${username}</ns2:userID>
-<ns2:password>${password}</ns2:password>
+<ns2:userID>${xmlEscape(username)}</ns2:userID>
+<ns2:password>${xmlEscape(password)}</ns2:password>
 </ns2:login>
 </soap:Body>
 </soap:Envelope>`;
@@ -164,10 +173,10 @@ async function fetchReportParamData(base, sessionToken, reportPath) {
 <soap:Body>
 <ns2:getReportParametersInSession xmlns:ns2="http://xmlns.oracle.com/oxp/service/v2">
 <ns2:reportRequest>
-<ns2:reportAbsolutePath>${reportPath}</ns2:reportAbsolutePath>
+<ns2:reportAbsolutePath>${xmlEscape(reportPath)}</ns2:reportAbsolutePath>
 <ns2:sizeOfDataChunkDownload>-1</ns2:sizeOfDataChunkDownload>
 </ns2:reportRequest>
-<ns2:bipSessionToken>${sessionToken}</ns2:bipSessionToken>
+<ns2:bipSessionToken>${xmlEscape(sessionToken)}</ns2:bipSessionToken>
 </ns2:getReportParametersInSession>
 </soap:Body>
 </soap:Envelope>`;
@@ -204,9 +213,9 @@ async function fetchReportLayouts(base, username, password, reportPath) {
 <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
 <soap:Body>
 <ns2:getReportDefinition xmlns:ns2="http://xmlns.oracle.com/oxp/service/v2">
-<ns2:userID>${username}</ns2:userID>
-<ns2:password>${password}</ns2:password>
-<ns2:reportAbsolutePath>${reportPath}</ns2:reportAbsolutePath>
+<ns2:userID>${xmlEscape(username)}</ns2:userID>
+<ns2:password>${xmlEscape(password)}</ns2:password>
+<ns2:reportAbsolutePath>${xmlEscape(reportPath)}</ns2:reportAbsolutePath>
 </ns2:getReportDefinition>
 </soap:Body>
 </soap:Envelope>`;
@@ -221,20 +230,19 @@ async function fetchReportLayouts(base, username, password, reportPath) {
   return await resp.text();
 }
 
-// ── IPC: hcm:getReportParams ──────────────────────────────────────────────────
+// ── IPC: bip:getReportParams ──────────────────────────────────────────────────
 
-ipcMain.handle('hcm:getReportParams', async (_event, { baseUrl, username, password, reportPath }) => {
+ipcMain.handle('bip:getReportParams', async (_event, { baseUrl, username, password, reportPath }) => {
   const base = baseUrl.replace(/\/$/, '');
-  const REPORT_PATH = reportPath || '/Custom/Financials/Campus Reports/DAV - Control Budget Report.xdo';
   try {
     const token = await bipLogin(base, username, password);
-    const { params, raw } = await fetchReportParamData(base, token, REPORT_PATH);
+    const { params, raw } = await fetchReportParamData(base, token, reportPath);
 
     // Also fetch layout names — non-fatal if it fails.
     let layoutsRaw = null;
     let layouts = [];
     try {
-      layoutsRaw = await fetchReportLayouts(base, username, password, REPORT_PATH);
+      layoutsRaw = await fetchReportLayouts(base, username, password, reportPath);
       // Extract defaultTemplateId (the report's default layout).
       const defaultId = extractElement(layoutsRaw, 'defaultTemplateId');
       // Extract all templateId values from listOfTemplateFormatsLabelValues items.
@@ -258,40 +266,41 @@ ipcMain.handle('hcm:getReportParams', async (_event, { baseUrl, username, passwo
   }
 });
 
-// ── IPC: hcm:budgetReport ─────────────────────────────────────────────────────
+// ── IPC: bip:runReport ────────────────────────────────────────────────────────
 //
-// 1. Logs in to get a session token.
-// 2. Fetches all report parameters and their Oracle-default values.
-// 3. Merges with user-supplied paramValues (non-empty UI values override defaults).
-// 4. Runs the report and opens the xlsx.
-// Returns { ok: true } | { ok: false, error: '...' }
+// If cachedDefaults is provided (from a previous Inspect Parameters call),
+// skips login + param fetch entirely — saving 2 round trips to Oracle.
+// Otherwise logs in and fetches parameter defaults fresh.
+// Returns { ok: true, soapXml } | { ok: false, error, sentParams, soapXml }
 
-ipcMain.handle('hcm:budgetReport', async (_event, { baseUrl, username, password, reportPath, paramValues, layoutName }) => {
+ipcMain.handle('bip:runReport', async (_event, { baseUrl, username, password, reportPath, paramValues, layoutName, cachedDefaults }) => {
   const base = baseUrl.replace(/\/$/, '');
-  const REPORT_PATH = reportPath || '/Custom/Financials/Campus Reports/DAV - Control Budget Report.xdo';
 
   let defaultValues = {};
   try {
-    // Step 1: login
-    const token = await bipLogin(base, username, password);
+    if (cachedDefaults) {
+      // Use defaults from the last Inspect Parameters call — skip login + param fetch.
+      defaultValues = { ...cachedDefaults };
+    } else {
+      // No cache — fetch fresh defaults from Oracle.
+      const token = await bipLogin(base, username, password);
+      ({ defaultValues } = await fetchReportParamData(base, token, reportPath));
+    }
 
-    // Step 2: fetch all parameters and their defaults
-    ({ defaultValues } = await fetchReportParamData(base, token, REPORT_PATH));
-
-    // Step 3: apply non-empty values from the UI — they override Oracle defaults.
+    // Apply non-empty values from the UI — they override Oracle defaults.
     for (const [k, v] of Object.entries(paramValues || {})) {
       if (v != null && v !== '') defaultValues[k] = v;
     }
 
-    // Step 4: run the report
+    // Run the report.
     const resolvedLayout = layoutName || '';
     const sentParams = Object.entries(defaultValues).filter(([, v]) => v != null && v !== '');
-    console.log(`[budgetReport] Layout: ${JSON.stringify(resolvedLayout)}`);
-    console.log(`[budgetReport] Sending ${sentParams.length} parameters:`);
+    console.log(`[runReport] Layout: ${JSON.stringify(resolvedLayout)}`);
+    console.log(`[runReport] Sending ${sentParams.length} parameters:`);
     for (const [k, v] of sentParams) console.log(`  ${k} = ${JSON.stringify(v)}`);
 
-    const { buffer, soapXml } = await runSoapReportBuffer(base, username, password, REPORT_PATH, defaultValues, resolvedLayout);
-    const reportName = path.basename(REPORT_PATH, path.extname(REPORT_PATH));
+    const { buffer, soapXml } = await runSoapReportBuffer(base, username, password, reportPath, defaultValues, resolvedLayout);
+    const reportName = path.basename(reportPath, path.extname(reportPath));
     // Use a timestamp suffix so Excel never serves a stale cached file.
     const timestamp  = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const filePath   = path.join(app.getPath('temp'), `${reportName} ${timestamp}.xlsx`);
@@ -321,7 +330,7 @@ async function runSoapReportBuffer(baseUrl, username, password, reportPath, para
   const paramXml = Object.entries(paramValues)
     .filter(([, v]) => v != null && v !== '')
     .map(([name, value]) =>
-      `<item>\n<name>${name}</name>\n<values><item>${value}</item></values>\n</item>`
+      `<item>\n<name>${xmlEscape(name)}</name>\n<values><item>${xmlEscape(value)}</item></values>\n</item>`
     ).join('\n');
 
   const envelope = `<?xml version="1.0" encoding="utf-8"?>
@@ -329,15 +338,15 @@ async function runSoapReportBuffer(baseUrl, username, password, reportPath, para
 <soap:Body>
 <runReport xmlns="http://xmlns.oracle.com/oxp/service/PublicReportService">
 <reportRequest>
-<reportAbsolutePath>${reportPath}</reportAbsolutePath>${templateName ? `\n<attributeTemplate>${templateName}</attributeTemplate>` : ''}
+<reportAbsolutePath>${xmlEscape(reportPath)}</reportAbsolutePath>${templateName ? `\n<attributeTemplate>${xmlEscape(templateName)}</attributeTemplate>` : ''}
 <attributeFormat>xlsx</attributeFormat>
 <sizeOfDataChunkDownload>-1</sizeOfDataChunkDownload>
 <parameterNameValues>
 ${paramXml}
 </parameterNameValues>
 </reportRequest>
-<userID>${username}</userID>
-<password>${password}</password>
+<userID>${xmlEscape(username)}</userID>
+<password>${xmlEscape(password)}</password>
 </runReport>
 </soap:Body>
 </soap:Envelope>`;

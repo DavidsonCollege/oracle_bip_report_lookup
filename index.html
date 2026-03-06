@@ -202,6 +202,39 @@
       line-height: 1.5;
       text-align: center;
     }
+
+    /* ── Param inspect panel ── */
+    .params-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
+    .params-filter-label { display: flex; align-items: center; gap: 0.35rem; font-size: 0.78rem; color: #374151; cursor: pointer; font-weight: 500; }
+    .params-filter-label input[type="checkbox"] { cursor: pointer; accent-color: #c74634; }
+    .params-list { border: 1.5px solid #e5e7eb; border-radius: 8px; overflow: hidden; }
+    .param-row + .param-row { border-top: 1px solid #e5e7eb; }
+    .param-row-header { display: flex; justify-content: space-between; align-items: center; padding: 0.65rem 1rem; user-select: none; cursor: default; }
+    .param-row-header.clickable { cursor: pointer; }
+    .param-row-header.clickable:hover { background: #f3f4f6; }
+    .param-name { font-weight: 600; font-size: 0.85rem; color: #111827; font-family: monospace; }
+    .param-arrow { font-size: 0.7rem; color: #9ca3af; }
+    .param-detail { display: none; padding: 0.5rem 1rem 0.75rem; background: #f9fafb; border-top: 1px solid #e5e7eb; }
+    .param-field { font-size: 0.8rem; color: #374151; margin-bottom: 0.4rem; }
+    .param-field-tag { display: block; color: #9ca3af; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .param-badge { display: inline-block; background: #e5e7eb; border-radius: 4px; padding: 0.1rem 0.45rem; margin: 0.15rem 0.15rem 0 0; font-size: 0.75rem; }
+
+    /* ── Layouts section ── */
+    .layouts-section { margin-top: 1rem; }
+    .layouts-box { border: 1.5px solid #e5e7eb; border-radius: 8px; padding: 0.75rem 1rem; background: #f9fafb; }
+
+    /* ── Raw XML collapsibles ── */
+    .raw-details { margin-top: 0.5rem; font-size: 0.75rem; color: #9ca3af; }
+    .soap-details { margin-top: 0.75rem; font-size: 0.75rem; color: #9ca3af; }
+    .raw-pre { margin-top: 0.4rem; white-space: pre-wrap; word-break: break-all; background: #f3f4f6; padding: 0.75rem; border-radius: 6px; font-size: 0.7rem; color: #374151; }
+
+    /* ── Param input labels ── */
+    .param-input-name { font-size: 0.72rem; color: #9ca3af; font-weight: 400; font-family: monospace; }
+    .required-star { color: #c74634; font-weight: 700; }
+
+    /* ── Utilities ── */
+    .result--inline { margin-top: 0; }
+    .mb-0 { margin-bottom: 0 !important; }
   </style>
 </head>
 <body>
@@ -270,7 +303,7 @@
   <script>
     // ── Restore saved settings on startup ──────────────────────────────────────
     const DEFAULT_REPORT_PATH = '/Custom/Financials/Campus Reports/DAV - Control Budget Report.xdo';
-    window.hcmAPI.getSettings().then(s => {
+    window.bipAPI.getSettings().then(s => {
       if (s.baseUrl)  document.getElementById('baseUrl').value    = s.baseUrl;
       if (s.username) document.getElementById('username').value   = s.username;
       document.getElementById('reportPath').value = s.reportPath || DEFAULT_REPORT_PATH;
@@ -282,7 +315,11 @@
       });
     });
 
-    // ── Control Budget Report ──────────────────────────────────────────────────
+    // ── Cached parameter defaults from last Inspect Parameters run ─────────────
+    // { reportPath, defaults: { paramName: defaultValue } }
+    let _cachedState = null;
+
+    // ── Run Report ─────────────────────────────────────────────────────────────
 
     async function runBudgetReport() {
       const btn      = document.getElementById('budgetBtn');
@@ -299,24 +336,32 @@
       document.querySelectorAll('#paramFieldsBox input[data-param]').forEach(input => {
         const val = input.value.trim();
         paramValues[input.dataset.param] = val;
-        if (!val && input.placeholder === 'Required') emptyRequired.push(input.dataset.param);
+        if (!val && input.dataset.required === 'true') emptyRequired.push(input.dataset.param);
       });
 
       const layoutName = document.getElementById('layoutSelect').value;
 
       if (!baseUrl || !username || !password) {
         resultEl.className = 'result error';
-        resultEl.innerHTML = '<span class="error-icon">&#9888;</span><span class="error-msg">All three credential fields are required.</span>';
+        resultEl.innerHTML = '<span class="error-icon">&#9888;</span><span class="error-msg">All credential fields are required.</span>';
         return;
       }
-
+      if (!reportPath) {
+        resultEl.className = 'result error';
+        resultEl.innerHTML = '<span class="error-icon">&#9888;</span><span class="error-msg">Report Path is required.</span>';
+        return;
+      }
       if (emptyRequired.length) {
         resultEl.className = 'result error';
         resultEl.innerHTML = `<span class="error-icon">&#9888;</span><span class="error-msg">Required parameter${emptyRequired.length > 1 ? 's' : ''} missing a value: <strong>${emptyRequired.join(', ')}</strong></span>`;
         return;
       }
 
-      window.hcmAPI.saveSettings({ baseUrl, username, reportPath });
+      window.bipAPI.saveSettings({ baseUrl, username, reportPath });
+
+      // Pass cached defaults when report path matches — skips Oracle param re-fetch.
+      const cachedDefaults = (_cachedState && _cachedState.reportPath === reportPath)
+        ? _cachedState.defaults : null;
 
       btn.disabled = true;
       btn.classList.add('loading');
@@ -324,11 +369,10 @@
       resultEl.innerHTML = '';
 
       try {
-        const result = await window.hcmAPI.budgetReport({ baseUrl, username, password, reportPath, paramValues, layoutName });
+        const result = await window.bipAPI.runReport({ baseUrl, username, password, reportPath, paramValues, layoutName, cachedDefaults });
 
-        // Always show the SOAP XML that was sent, regardless of success/failure.
         const xmlBlock = result.soapXml
-          ? `<details style="margin-top:0.75rem;font-size:0.75rem;color:#9ca3af"><summary style="cursor:pointer">SOAP XML sent</summary><pre style="margin-top:0.4rem;white-space:pre-wrap;word-break:break-all;background:#f3f4f6;padding:0.75rem;border-radius:6px;font-size:0.7rem;color:#374151">${esc(result.soapXml)}</pre></details>`
+          ? `<details class="soap-details"><summary style="cursor:pointer">SOAP XML sent</summary><pre class="raw-pre">${esc(result.soapXml)}</pre></details>`
           : '';
 
         if (!result.ok) {
@@ -361,7 +405,12 @@
 
       if (!baseUrl || !username || !password) {
         resultEl.style.display = 'block';
-        resultEl.innerHTML = '<div class="result error" style="display:block;margin:0"><span class="error-icon">&#9888;</span>All three credential fields are required.</div>';
+        resultEl.innerHTML = '<div class="result result--inline error">&#9888; All credential fields are required.</div>';
+        return;
+      }
+      if (!reportPath) {
+        resultEl.style.display = 'block';
+        resultEl.innerHTML = '<div class="result result--inline error">&#9888; Report Path is required.</div>';
         return;
       }
 
@@ -371,8 +420,16 @@
       resultEl.innerHTML = '';
 
       try {
-        const result = await window.hcmAPI.getReportParams({ baseUrl, username, password, reportPath });
+        const result = await window.bipAPI.getReportParams({ baseUrl, username, password, reportPath });
         if (!result.ok) throw new Error(result.error);
+
+        // Cache defaults for use by Run Report (avoids re-fetching from Oracle).
+        const defaults = {};
+        for (const p of result.params) {
+          const rawDef = (p.fields.find(f => f.tag === 'defaultValue') ?? {}).value ?? '';
+          defaults[p.name] = Array.isArray(rawDef) ? (rawDef[0] ?? '') : rawDef;
+        }
+        _cachedState = { reportPath, defaults };
 
         // Populate the Report Parameters input section.
         renderParamFields(result.params);
@@ -385,7 +442,7 @@
         sel.disabled = result.layouts.length === 0;
 
         if (!result.params.length) {
-          resultEl.innerHTML = '<div class="result success" style="display:block;margin:0">No parameters found (report may have none, or the server returned an unexpected format).</div>';
+          resultEl.innerHTML = '<div class="result result--inline success">No parameters found (report may have none, or the server returned an unexpected format).</div>';
           resultEl.style.display = 'block';
           return;
         }
@@ -394,67 +451,56 @@
           (p.fields.find(f => f.tag === 'required') ?? {}).value === 'true'
         ).length;
 
-        let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">`;
-        html += `<p class="section-label" style="margin:0">Report Parameters (${result.params.length}) — click to expand</p>`;
-        html += `<label style="display:flex;align-items:center;gap:0.35rem;font-size:0.78rem;color:#374151;cursor:pointer;font-weight:500;">`;
-        html += `<input type="checkbox" id="reqOnlyChk" onchange="filterParams()" style="cursor:pointer;accent-color:#c74634;">`;
-        html += `Required only (${requiredCount})</label></div>`;
-        html += '<div style="border:1.5px solid #e5e7eb;border-radius:8px;overflow:hidden;">';
+        let html = `<div class="params-header">`;
+        html += `<p class="section-label mb-0">Report Parameters (${result.params.length}) — click to expand</p>`;
+        html += `<label class="params-filter-label"><input type="checkbox" id="reqOnlyChk" onchange="filterParams()"> Required only (${requiredCount})</label>`;
+        html += `</div>`;
+        html += `<div class="params-list">`;
         result.params.forEach((p, i) => {
           const id = `param-detail-${i}`;
           const hasDetails = p.fields.filter(f => f.tag !== 'name').length > 0;
           const isRequired = (p.fields.find(f => f.tag === 'required') ?? {}).value === 'true';
-          html += `<div data-required="${isRequired}" style="border-top:${i ? '1px solid #e5e7eb' : 'none'}">`;
-          // Header row — always visible, clickable if there are details
-          html += `<div onclick="toggleParam('${id}')" style="display:flex;justify-content:space-between;align-items:center;padding:0.65rem 1rem;cursor:${hasDetails ? 'pointer' : 'default'};user-select:none;" onmouseover="if(${hasDetails})this.style.background='#f3f4f6'" onmouseout="this.style.background=''">`;
-          html += `<span style="font-weight:600;font-size:0.85rem;color:#111827;font-family:monospace">${esc(p.name)}</span>`;
-          if (hasDetails) html += `<span id="${id}-arrow" style="font-size:0.7rem;color:#9ca3af">&#9660;</span>`;
-          html += '</div>';
-          // Detail panel — hidden by default
+          html += `<div class="param-row" data-required="${isRequired}">`;
+          html += `<div class="param-row-header${hasDetails ? ' clickable' : ''}" onclick="${hasDetails ? `toggleParam('${id}')` : ''}">`;
+          html += `<span class="param-name">${esc(p.name)}</span>`;
+          if (hasDetails) html += `<span class="param-arrow" id="${id}-arrow">&#9660;</span>`;
+          html += `</div>`;
           const detailFields = p.fields.filter(f => f.tag !== 'name');
           if (detailFields.length) {
-            html += `<div id="${id}" style="display:none;padding:0.5rem 1rem 0.75rem 1rem;background:#f9fafb;border-top:1px solid #e5e7eb;">`;
+            html += `<div class="param-detail" id="${id}">`;
             for (const f of detailFields) {
-              html += `<div style="font-size:0.8rem;color:#374151;margin-bottom:0.4rem">`;
-              html += `<span style="color:#9ca3af;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em">${esc(f.tag)}</span><br>`;
+              html += `<div class="param-field">`;
+              html += `<span class="param-field-tag">${esc(f.tag)}</span>`;
               if (Array.isArray(f.value)) {
-                html += f.value.map(v => `<span style="display:inline-block;background:#e5e7eb;border-radius:4px;padding:0.1rem 0.45rem;margin:0.15rem 0.15rem 0 0;font-size:0.75rem">${esc(v)}</span>`).join('');
+                html += f.value.map(v => `<span class="param-badge">${esc(v)}</span>`).join('');
               } else {
                 html += `<span>${esc(f.value)}</span>`;
               }
-              html += '</div>';
+              html += `</div>`;
             }
-            html += '</div>';
+            html += `</div>`;
           }
-          html += '</div>';
+          html += `</div>`;
         });
-        html += '</div>';
+        html += `</div>`;
 
-        // Layouts section
         if (result.layouts && result.layouts.length) {
-          html += `<div style="margin-top:1rem;">`;
-          html += `<p class="section-label" style="margin-bottom:0.4rem">Available Layouts (${result.layouts.length})</p>`;
-          html += `<div style="border:1.5px solid #e5e7eb;border-radius:8px;padding:0.75rem 1rem;background:#f9fafb;">`;
-          html += result.layouts.map(l => `<span style="display:inline-block;background:#e5e7eb;border-radius:4px;padding:0.15rem 0.55rem;margin:0.15rem 0.15rem 0 0;font-size:0.8rem;font-family:monospace">${esc(l)}</span>`).join('');
+          html += `<div class="layouts-section">`;
+          html += `<p class="section-label mb-0" style="margin-bottom:0.4rem">Available Layouts (${result.layouts.length})</p>`;
+          html += `<div class="layouts-box">`;
+          html += result.layouts.map(l => `<span class="param-badge">${esc(l)}</span>`).join('');
           html += `</div></div>`;
         }
 
-        // Raw XML toggle
-        html += `<details style="margin-top:0.5rem;font-size:0.75rem;color:#9ca3af">
-          <summary style="cursor:pointer">Raw SOAP response (params)</summary>
-          <pre style="margin-top:0.4rem;white-space:pre-wrap;word-break:break-all;background:#f3f4f6;padding:0.75rem;border-radius:6px;font-size:0.7rem;color:#374151">${esc(result.raw)}</pre>
-        </details>`;
+        html += `<details class="raw-details"><summary style="cursor:pointer">Raw SOAP response (params)</summary><pre class="raw-pre">${esc(result.raw)}</pre></details>`;
         if (result.layoutsRaw) {
-          html += `<details style="margin-top:0.25rem;font-size:0.75rem;color:#9ca3af">
-            <summary style="cursor:pointer">Raw SOAP response (layouts)</summary>
-            <pre style="margin-top:0.4rem;white-space:pre-wrap;word-break:break-all;background:#f3f4f6;padding:0.75rem;border-radius:6px;font-size:0.7rem;color:#374151">${esc(result.layoutsRaw)}</pre>
-          </details>`;
+          html += `<details class="raw-details" style="margin-top:0.25rem"><summary style="cursor:pointer">Raw SOAP response (layouts)</summary><pre class="raw-pre">${esc(result.layoutsRaw)}</pre></details>`;
         }
 
         resultEl.innerHTML = html;
         resultEl.style.display = 'block';
       } catch (err) {
-        resultEl.innerHTML = `<div class="result error" style="display:block;margin:0"><span class="error-icon">&#9888;</span><span class="error-msg">${esc(err.message)}</span></div>`;
+        resultEl.innerHTML = `<div class="result result--inline error"><span class="error-icon">&#9888;</span><span class="error-msg">${esc(err.message)}</span></div>`;
         resultEl.style.display = 'block';
       } finally {
         btn.disabled = false;
@@ -473,13 +519,12 @@
         box.innerHTML = '<span style="font-size:0.82rem;color:#9ca3af">No parameters found.</span>';
         return;
       }
-      // Reset LOV data
       for (const k of Object.keys(_lovData)) delete _lovData[k];
 
       let html = '';
       for (const p of params) {
-        const rawDefault = (p.fields.find(f => f.tag === 'defaultValue') ?? {}).value ?? '';
-        const defaultVal = Array.isArray(rawDefault) ? (rawDefault[0] ?? '') : rawDefault;
+        const rawDefault  = (p.fields.find(f => f.tag === 'defaultValue') ?? {}).value ?? '';
+        const defaultVal  = Array.isArray(rawDefault) ? (rawDefault[0] ?? '') : rawDefault;
         const lovField    = p.fields.find(f => f.tag === 'values');
         const lovValues   = lovField
           ? (Array.isArray(lovField.value) ? lovField.value : [lovField.value].filter(Boolean))
@@ -488,22 +533,24 @@
         const lovLabels   = labelsField
           ? (Array.isArray(labelsField.value) ? labelsField.value : [labelsField.value].filter(Boolean))
           : [];
-        const isRequired = (p.fields.find(f => f.tag === 'required') ?? {}).value === 'true';
-        const inputId    = `dp-${p.name}`;
+        const isRequired  = (p.fields.find(f => f.tag === 'required') ?? {}).value === 'true';
+        const labelText   = (p.fields.find(f => f.tag === 'label') ?? {}).value || p.name;
+        const inputId     = `dp-${p.name}`;
 
         if (lovValues.length) _lovData[p.name] = { values: lovValues, labels: lovLabels };
 
         html += `<div class="field">`;
-        html += `<label for="${inputId}">${esc(p.name)}`;
-        if (isRequired) html += ` <span style="color:#c74634;font-weight:700">*</span>`;
+        html += `<label for="${inputId}">${esc(labelText)}`;
+        if (labelText !== p.name) html += ` <span class="param-input-name">${esc(p.name)}</span>`;
+        if (isRequired) html += ` <span class="required-star">*</span>`;
         html += `</label>`;
         if (lovValues.length) {
           html += `<div class="lov-wrap">`;
-          html += `<input type="text" id="${inputId}" data-param="${esc(p.name)}" value="${esc(defaultVal)}" placeholder="${isRequired ? 'Required' : 'Optional'}" autocomplete="off" />`;
+          html += `<input type="text" id="${inputId}" data-param="${esc(p.name)}" data-required="${isRequired}" value="${esc(defaultVal)}" placeholder="${isRequired ? 'Required' : 'Optional'}" autocomplete="off" />`;
           html += `<div class="lov-dd" id="dd-${esc(p.name)}"></div>`;
           html += `</div>`;
         } else {
-          html += `<input type="text" id="${inputId}" data-param="${esc(p.name)}" value="${esc(defaultVal)}" placeholder="${isRequired ? 'Required' : 'Optional'}" />`;
+          html += `<input type="text" id="${inputId}" data-param="${esc(p.name)}" data-required="${isRequired}" value="${esc(defaultVal)}" placeholder="${isRequired ? 'Required' : 'Optional'}" />`;
         }
         html += `</div>`;
       }
@@ -533,8 +580,9 @@
           dd.style.display = 'block';
         }
 
+        let _debounce;
         input.addEventListener('focus', () => showFiltered(''));
-        input.addEventListener('input', () => showFiltered(input.value));
+        input.addEventListener('input', () => { clearTimeout(_debounce); _debounce = setTimeout(() => showFiltered(input.value), 100); });
         input.addEventListener('blur',  () => setTimeout(() => { dd.style.display = 'none'; }, 150));
         dd.addEventListener('mousedown', e => {
           const opt = e.target.closest('.lov-opt');
@@ -545,7 +593,7 @@
 
     function filterParams() {
       const reqOnly = document.getElementById('reqOnlyChk').checked;
-      document.querySelectorAll('#paramsResult [data-required]').forEach(row => {
+      document.querySelectorAll('#paramsResult .param-row').forEach(row => {
         row.style.display = reqOnly && row.dataset.required !== 'true' ? 'none' : '';
       });
     }
