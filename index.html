@@ -114,7 +114,6 @@
 
     input[type="text"],
     input[type="password"],
-    input[type="url"],
     select {
       width: 100%;
       padding: 0.55rem 0.75rem;
@@ -129,6 +128,16 @@
 
     select:disabled { background: #f9fafb; color: #9ca3af; cursor: not-allowed; }
 
+    select:not(:disabled) {
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 0.75rem center;
+      padding-right: 2rem;
+      cursor: pointer;
+    }
+
+    select:focus,
     input:focus {
       border-color: #c74634;
       box-shadow: 0 0 0 3px rgba(199,70,52,0.12);
@@ -254,8 +263,13 @@
     <p class="section-label">Connection &amp; Credentials</p>
     <div class="credentials-box">
       <div class="field">
-        <label for="baseUrl">Oracle URL</label>
-        <input type="url" id="baseUrl" placeholder="https://your-instance.fa.ocs.oraclecloud.com" />
+        <label for="baseUrl">HCM Environment</label>
+        <select id="baseUrl">
+          <option value="https://fa-exci-saasfaprod1.fa.ocs.oraclecloud.com">Production</option>
+          <option value="https://fa-exci-dev1-saasfaprod1.fa.ocs.oraclecloud.com">Dev 1</option>
+          <option value="https://fa-exci-dev3-saasfaprod1.fa.ocs.oraclecloud.com">Dev 3</option>
+          <option value="https://fa-exci-test-saasfaprod1.fa.ocs.oraclecloud.com">Test</option>
+        </select>
       </div>
       <div class="field">
         <label for="username">Username</label>
@@ -309,7 +323,7 @@
       document.getElementById('reportPath').value = s.reportPath || DEFAULT_REPORT_PATH;
     });
 
-    ['baseUrl', 'username', 'password'].forEach(id => {
+    ['username', 'password'].forEach(id => {
       document.getElementById(id).addEventListener('keydown', e => {
         if (e.key === 'Enter') runBudgetReport();
       });
@@ -353,7 +367,7 @@
       }
       if (emptyRequired.length) {
         resultEl.className = 'result error';
-        resultEl.innerHTML = `<span class="error-icon">&#9888;</span><span class="error-msg">Required parameter${emptyRequired.length > 1 ? 's' : ''} missing a value: <strong>${emptyRequired.join(', ')}</strong></span>`;
+        resultEl.innerHTML = `<span class="error-icon">&#9888;</span><span class="error-msg">Required parameter${emptyRequired.length > 1 ? 's' : ''} missing a value: <strong>${emptyRequired.map(esc).join(', ')}</strong></span>`;
         return;
       }
 
